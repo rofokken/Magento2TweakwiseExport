@@ -26,6 +26,8 @@ use Zend_Db_Select;
 
 class EavIterator implements IteratorAggregate
 {
+    const ENTITY_BATCH_SIZE = 500;
+
     /**
      * @var string
      */
@@ -65,6 +67,11 @@ class EavIterator implements IteratorAggregate
      * @var DbContext
      */
     protected $dbContext;
+
+    /**
+     * @var \ArrayIterator[]
+     */
+    protected $entitySet;
 
     /**
      * @var array
@@ -172,7 +179,7 @@ class EavIterator implements IteratorAggregate
 
             $attribute = $this->attributes[$attributeId];
             $attributeCode = $attribute->getAttributeCode();
-            $rowEntityId = (int) $row['entity_id'];
+            $rowEntityId = (int)$row['entity_id'];
 
             if ($entity['entity_id'] !== $rowEntityId) {
                 // If current loop entity is new yield return this entity
@@ -181,7 +188,7 @@ class EavIterator implements IteratorAggregate
                 }
 
                 $entity = [
-                    'entity_id' => (int) $row['entity_id'],
+                    'entity_id' => (int)$row['entity_id'],
                     $attributeCode => $value,
                 ];
             } else {
@@ -219,33 +226,60 @@ class EavIterator implements IteratorAggregate
     }
 
     /**
-     * {@inheritdoc}
+     * @Return \AppendIterator
      */
     public function getIterator()
     {
-        try {
-            Profiler::start('eav-iterator::' . $this->entityCode);
-
-            $select = $this->createSelect();
-
-            Profiler::start('query');
+        while ($entityIds = $this->getEntityBatch()) {
             try {
-                /** @var MysqlStatement $stmt */
-                $stmt = $select->query();
-            } finally {
-                Profiler::stop('query');
-            }
+                Profiler::start('eav-iterator::' . $this->entityCode);
+                $this->setEntityIds($entityIds);
+                $select = $this->createSelect();
 
-            Profiler::start('loop');
-            try {
-                // Loop over all rows and combine them to one array for entity
-                return $this->loopUnionRows($stmt);
+                Profiler::start('query');
+                try {
+                    /** @var MysqlStatement $stmt */
+                    $stmt = $select->query();
+                } finally {
+                    Profiler::stop('query');
+                }
+
+                Profiler::start('loop');
+                try {
+                    // Loop over all rows and combine them to one array for entity
+                    foreach ($this->loopUnionRows($stmt) as $result) {
+                        yield $result;
+                    }
+                } finally {
+                    Profiler::stop('loop');
+                }
             } finally {
-                Profiler::stop('loop');
+                Profiler::stop('eav-iterator::' . $this->entityCode);
             }
-        } finally {
-            Profiler::stop('eav-iterator::' . $this->entityCode);
         }
+    }
+
+    /**
+     * @return int[]
+     */
+    protected function getEntityBatch()
+    {
+        $storeId = $this->storeId;
+        if (!isset($this->entitySet[$storeId])) {
+            $select = $this->getConnection()->select();
+            $select->from($this->getEntityType()->getEntityTable());
+            $select->reset('columns')->columns('entity_id');
+            if ($this->getEntityIds()) {
+                $select->where('entity_id IN (?)', $this->getEntityIds());
+            }
+            $result = $select->query()->fetchAll();
+            $result = array_column($result, 'entity_id');
+            $this->entitySet[$storeId] = new \ArrayIterator(array_chunk($result, self::ENTITY_BATCH_SIZE));
+        }
+
+        $return = $this->entitySet[$storeId]->current();
+        $this->entitySet[$storeId]->next();
+        return $return;
     }
 
     /**
