@@ -423,6 +423,10 @@ class ExportEntity
      */
     public function getStockItem(): StockItemInterface
     {
+        if ($this->stockItem === null) {
+           throw new \InvalidArgumentException('Stock item not set')
+        }
+        
         return $this->stockItem;
     }
 
